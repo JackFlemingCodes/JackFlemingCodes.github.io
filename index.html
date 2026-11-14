@@ -23,14 +23,6 @@ header select{background:#2b2f35;color:#fff;border:1px solid #444;border-radius:
 .btn:hover{border-color:#bbb}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .btn.ghost{background:transparent;color:inherit;border-color:#555}
-.signin{position:fixed;inset:0;background:rgba(28,31,35,.92);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
-.signin[hidden]{display:none}
-.signin .card{background:#fff;border-radius:16px;padding:32px 28px;max-width:380px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.35)}
-.signin h2{margin:0 0 6px;font-size:24px}
-.signin h2 span{color:var(--accent)}
-.signin p{color:var(--muted);margin:0 0 22px}
-.signin .google{width:100%;padding:12px;font-size:16px;font-weight:600}
-.signin .skip{display:block;margin:14px auto 0;background:none;border:none;color:var(--muted);text-decoration:underline;cursor:pointer;font-size:13px}
 .sync-status{font-size:13px;color:#b9bdc3}
 .sync-status.ok::before{content:"● ";color:#4caf7d}
 .sync-status.err::before{content:"● ";color:#e4572e}
@@ -113,7 +105,6 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
   <button class="btn ghost" id="newPlanBtn">+ New plan</button>
   <div class="spacer"></div>
   <span id="syncStatus" class="sync-status"></span>
-  <button class="btn ghost" id="authBtn" hidden>Sign in to sync</button>
   <button class="btn ghost" id="importBtn">Import</button>
   <button class="btn ghost" id="exportBtn">Export</button>
   <button class="btn ghost" id="printBtn">Print</button>
@@ -122,14 +113,6 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
 
 <main id="app"></main>
 
-<div class="signin" id="signinOverlay" hidden>
-  <div class="card">
-    <h2>Stride<span>.</span></h2>
-    <p>Sign in to see your training plans on all your devices.</p>
-    <button class="btn primary google" id="signinGo">Continue with Google</button>
-    <button class="skip" id="signinSkip">Use without signing in</button>
-  </div>
-</div>
 
 <!-- Workout editor -->
 <dialog id="dayDlg">
@@ -222,7 +205,6 @@ const FIREBASE_CONFIG = {
 };
 const FIREBASE_VERSION = "10.12.2";
 let cloud = null; // {fs, col, synced:{planId: json}, ready}
-const authBtn = document.getElementById("authBtn");
 const syncStatus = document.getElementById("syncStatus");
 function setStatus(text, cls=""){ syncStatus.textContent = text; syncStatus.className = "sync-status " + cls; }
 
@@ -247,80 +229,34 @@ function pushCloud(){
 
 async function initCloud(){
   if(!FIREBASE_CONFIG) return;
+  setStatus("Syncing…");
   const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/`;
-  let appMod, authMod, fs;
+  let appMod, fs;
   try{
-    [appMod, authMod, fs] = await Promise.all([
-      import(base + "firebase-app.js"), import(base + "firebase-auth.js"), import(base + "firebase-firestore.js")
-    ]);
-  }catch(e){ setStatus("Sync unavailable", "err"); return; }
-  const fbApp = appMod.initializeApp(FIREBASE_CONFIG);
-  const auth = authMod.getAuth(fbApp);
-  const db = fs.getFirestore(fbApp);
-  authBtn.hidden = false;
-
-  const overlay = document.getElementById("signinOverlay");
-  const doSignIn = async () => {
-    const provider = new authMod.GoogleAuthProvider();
-    try{ await authMod.signInWithPopup(auth, provider); }
-    catch(e){
-      if(e.code === "auth/popup-blocked" || e.code === "auth/operation-not-supported-in-this-environment")
-        authMod.signInWithRedirect(auth, provider);
-      else if(e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request")
-        alert("Sign-in failed: " + e.message);
+    [appMod, fs] = await Promise.all([import(base + "firebase-app.js"), import(base + "firebase-firestore.js")]);
+  }catch(e){ setStatus("Offline — saved on this device", "err"); return; }
+  const db = fs.getFirestore(appMod.initializeApp(FIREBASE_CONFIG));
+  const col = fs.collection(db, "shared");
+  cloud = {fs, col, synced:{}, ready:false};
+  fs.onSnapshot(col, snap => {
+    if(!cloud.ready && snap.metadata.fromCache) return; // wait for real server data before first merge
+    const remote = {};
+    snap.forEach(d => { try{ remote[d.id] = JSON.parse(d.data().json); }catch(e){} });
+    const synced = {};
+    Object.entries(remote).forEach(([id, p]) => synced[id] = JSON.stringify(p));
+    if(!cloud.ready){
+      // The first time this device ever syncs, upload any plans it made on its own.
+      let first = true; try{ first = localStorage.getItem("stride-synced") !== "1"; localStorage.setItem("stride-synced", "1"); }catch(e){}
+      if(first) state.plans.forEach(p => { if(!remote[p.id]) remote[p.id] = p; });
+      cloud.ready = true;
     }
-  };
-  authBtn.onclick = async () => {
-    if(auth.currentUser){
-      if(confirmAction("Sign out? Your plans stay saved in your account.")){
-        try{ sessionStorage.setItem("stride-skip-signin", "1"); }catch(e){}
-        await authMod.signOut(auth);
-      }
-      return;
-    }
-    doSignIn();
-  };
-  document.getElementById("signinGo").onclick = doSignIn;
-  document.getElementById("signinSkip").onclick = () => {
-    overlay.hidden = true;
-    try{ sessionStorage.setItem("stride-skip-signin", "1"); }catch(e){}
-  };
-
-  let unsub = null;
-  authMod.onAuthStateChanged(auth, user => {
-    if(unsub){ unsub(); unsub = null; }
-    cloud = null;
-    if(!user){
-      authBtn.textContent = "Sign in to sync"; authBtn.title = ""; setStatus("Not synced");
-      let skipped = false; try{ skipped = sessionStorage.getItem("stride-skip-signin") === "1"; }catch(e){}
-      overlay.hidden = skipped;
-      return;
-    }
-    overlay.hidden = true;
-    authBtn.textContent = "Sign out";
-    authBtn.title = "Signed in as " + (user.email || user.displayName || "");
-    setStatus("Syncing…");
-    const col = fs.collection(db, "users", user.uid, "plans");
-    cloud = {fs, col, synced:{}, ready:false};
-    unsub = fs.onSnapshot(col, snap => {
-      if(!cloud.ready && snap.metadata.fromCache) return; // wait for real server data before first merge
-      const remote = {};
-      snap.forEach(d => { try{ remote[d.id] = JSON.parse(d.data().json); }catch(e){} });
-      const synced = {};
-      Object.entries(remote).forEach(([id, p]) => synced[id] = JSON.stringify(p));
-      if(!cloud.ready){
-        // First load after sign-in: keep any plans made on this device that aren't in the cloud yet.
-        state.plans.forEach(p => { if(!remote[p.id]) remote[p.id] = p; });
-        cloud.ready = true;
-      }
-      cloud.synced = synced;
-      state.plans = Object.values(remote).sort((a,b) => (a.created||0) - (b.created||0));
-      if(!current()) state.currentId = state.plans[0]?.id || null;
-      save();
-      safeRender();
-      if(!snap.metadata.hasPendingWrites) setStatus("Synced", "ok");
-    }, err => setStatus("Sync error", "err"));
-  });
+    cloud.synced = synced;
+    state.plans = Object.values(remote).sort((a,b) => (a.created||0) - (b.created||0));
+    if(!current()) state.currentId = state.plans[0]?.id || null;
+    save();
+    safeRender();
+    if(!snap.metadata.hasPendingWrites) setStatus("Synced", "ok");
+  }, err => setStatus("Sync error", "err"));
 }
 
 // Don't redraw while you're typing in a field; redraw when you leave it.
@@ -431,7 +367,7 @@ function render(){
   if(!p){
     app.innerHTML = `<div class="panel empty-state">
       <h2>Build your running plan</h2>
-      <p class="hint" style="font-size:15px">Create a plan from scratch or start from a 5K, 10K, half or marathon template — then edit any day you like.<br>Plans are saved in this browser. Sign in to sync them across your devices, or use Export to back them up.</p>
+      <p class="hint" style="font-size:15px">Create a plan from scratch or start from a 5K, 10K, half or marathon template — then edit any day you like.<br>Plans are saved in this browser. They sync automatically to every device you open this site on.</p>
       <button class="btn primary" onclick="document.getElementById('newPlanBtn').click()">+ Create your first plan</button>
     </div>`;
     return;

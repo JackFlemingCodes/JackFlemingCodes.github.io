@@ -195,7 +195,14 @@ function save(){
 
 // ---------- cloud sync (Firebase) ----------
 // Paste your Firebase web app config here to turn on syncing across devices.
-const FIREBASE_CONFIG = null;
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBWUb0_mgmS2prnekmuEPI6JJcJsp_gORI",
+  authDomain: "running-planner-e6cdf.firebaseapp.com",
+  projectId: "running-planner-e6cdf",
+  storageBucket: "running-planner-e6cdf.firebasestorage.app",
+  messagingSenderId: "944538122128",
+  appId: "1:944538122128:web:bfdad07a9b3d7180956515"
+};
 const FIREBASE_VERSION = "10.12.2";
 let cloud = null; // {fs, col, synced:{planId: json}, ready}
 const authBtn = document.getElementById("authBtn");

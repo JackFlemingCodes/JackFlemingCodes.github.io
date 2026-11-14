@@ -8,7 +8,7 @@ A simple, no-signup website for building your own running training plans.
 - See weekly totals, a mileage chart, peak week, and progress
 - Export and import plans as JSON, and print a plan
 
-Plans sync automatically through Firebase (Firestore collection `shared`) to every device that opens the site, with no sign-in. Anyone with the link can view and edit them.
+Plans are stored in Firebase (Firestore collection `shared`). Anyone with the link can view them. Only the owner can edit, after signing in with Google; the Firestore rules enforce this.
 
 ## Live site
 

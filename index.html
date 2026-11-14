@@ -23,6 +23,10 @@ header select{background:#2b2f35;color:#fff;border:1px solid #444;border-radius:
 .btn:hover{border-color:#bbb}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .btn.ghost{background:transparent;color:inherit;border-color:#555}
+body.view-only .edit-only{display:none!important}
+body.view-only .day{cursor:default}
+body.view-only .day.empty .hint{visibility:hidden}
+fieldset.plain{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:12px;min-width:0}
 .sync-status{font-size:13px;color:#b9bdc3}
 .sync-status.ok::before{content:"● ";color:#4caf7d}
 .sync-status.err::before{content:"● ";color:#e4572e}
@@ -71,7 +75,8 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
 .dlg{padding:18px 20px;display:flex;flex-direction:column;gap:12px}
 .dlg h2{margin:0;font-size:18px}
 .dlg .row{display:flex;gap:10px}
-.dlg .row .field{flex:1}
+.dlg .row .field{flex:1;min-width:0}
+.dlg .field input,.dlg .field select,.dlg .field textarea{width:100%}
 .dlg .foot{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}
 .dlg .foot .left{margin-right:auto}
 .types{display:flex;flex-wrap:wrap;gap:6px}
@@ -102,10 +107,11 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
 <header>
   <h1>Stride<span>.</span></h1>
   <select id="planSelect" title="Your plans"></select>
-  <button class="btn ghost" id="newPlanBtn">+ New plan</button>
+  <button class="btn ghost edit-only" id="newPlanBtn">+ New plan</button>
   <div class="spacer"></div>
   <span id="syncStatus" class="sync-status"></span>
-  <button class="btn ghost" id="importBtn">Import</button>
+  <button class="btn ghost" id="authBtn" hidden>Sign in to edit</button>
+  <button class="btn ghost edit-only" id="importBtn">Import</button>
   <button class="btn ghost" id="exportBtn">Export</button>
   <button class="btn ghost" id="printBtn">Print</button>
   <input type="file" id="importFile" accept=".json,application/json" hidden>
@@ -118,6 +124,7 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
 <dialog id="dayDlg">
   <form method="dialog" class="dlg" id="dayForm">
     <h2 id="dayTitle">Edit workout</h2>
+    <fieldset class="plain" id="dayFields">
     <div class="field"><label>Type</label><div class="types" id="typePicker"></div></div>
     <div class="row">
       <div class="field"><label id="distLabel">Distance</label><input type="number" step="0.1" min="0" id="fDist"></div>
@@ -126,10 +133,11 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
     <div class="field"><label>Pace / effort target</label><input type="text" id="fPace" placeholder="e.g. 8:30/mi, conversational, RPE 7"></div>
     <div class="field"><label>Details</label><textarea id="fNotes" rows="3" placeholder="e.g. 6 × 800m @ 5K pace, 400m jog recovery"></textarea></div>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="fDone"> Completed</label>
+    </fieldset>
     <div class="foot">
-      <button type="button" class="btn danger left" id="clearDay">Clear</button>
+      <button type="button" class="btn danger left edit-only" id="clearDay">Clear</button>
       <button type="button" class="btn" id="cancelDay">Cancel</button>
-      <button type="submit" class="btn primary">Save</button>
+      <button type="submit" class="btn primary edit-only">Save</button>
     </div>
   </form>
 </dialog>
@@ -208,55 +216,109 @@ let cloud = null; // {fs, col, synced:{planId: json}, ready}
 const syncStatus = document.getElementById("syncStatus");
 function setStatus(text, cls=""){ syncStatus.textContent = text; syncStatus.className = "sync-status " + cls; }
 
+// Without Firebase configured, the site works locally and is always editable.
+function canEdit(){ return !FIREBASE_CONFIG || !!(cloud && cloud.user); }
+function applyMode(){ document.body.classList.toggle("view-only", !canEdit()); }
+
 function pushCloud(){
-  if(!cloud || !cloud.ready) return;
+  if(!cloud || !cloud.ready || !cloud.user) return;
   const {fs, col, synced} = cloud;
   const ids = new Set(state.plans.map(p => p.id));
+  const fail = err => setStatus(err.code === "permission-denied" ? "This account can't edit" : "Sync error", "err");
   state.plans.forEach(p => {
     const json = JSON.stringify(p);
     if(synced[p.id] === json) return;
     synced[p.id] = json;
     setStatus("Saving…");
-    fs.setDoc(fs.doc(col, p.id), {json, updated: fs.serverTimestamp()})
-      .catch(err => setStatus("Sync error", "err"));
+    fs.setDoc(fs.doc(col, p.id), {json, updated: fs.serverTimestamp()}).catch(fail);
   });
   Object.keys(synced).forEach(id => {
     if(ids.has(id)) return;
     delete synced[id];
-    fs.deleteDoc(fs.doc(col, id)).catch(err => setStatus("Sync error", "err"));
+    fs.deleteDoc(fs.doc(col, id)).catch(fail);
   });
 }
 
-async function initCloud(){
-  if(!FIREBASE_CONFIG) return;
-  setStatus("Syncing…");
-  const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/`;
-  let appMod, fs;
+// Plans made on this device before syncing existed are kept here until the owner signs in and uploads them.
+const BACKUP_KEY = "stride-local-backup";
+function backupLocalPlans(remote){
   try{
-    [appMod, fs] = await Promise.all([import(base + "firebase-app.js"), import(base + "firebase-firestore.js")]);
-  }catch(e){ setStatus("Offline — saved on this device", "err"); return; }
-  const db = fs.getFirestore(appMod.initializeApp(FIREBASE_CONFIG));
+    if(localStorage.getItem("stride-uploaded") === "1" || localStorage.getItem(BACKUP_KEY)) return;
+    const mine = state.plans.filter(p => !remote[p.id]);
+    if(mine.length) localStorage.setItem(BACKUP_KEY, JSON.stringify(mine));
+  }catch(e){}
+}
+function uploadBackup(){
+  try{
+    const mine = JSON.parse(localStorage.getItem(BACKUP_KEY) || "[]");
+    mine.forEach(p => { if(!state.plans.some(x => x.id === p.id)) state.plans.push(p); });
+    localStorage.removeItem(BACKUP_KEY);
+    localStorage.setItem("stride-uploaded", "1");
+    if(mine.length){ save(); safeRender(); }
+  }catch(e){}
+}
+
+async function initCloud(){
+  applyMode();
+  if(!FIREBASE_CONFIG) return;
+  setStatus("Loading…");
+  const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/`;
+  let appMod, authMod, fs;
+  try{
+    [appMod, authMod, fs] = await Promise.all([
+      import(base + "firebase-app.js"), import(base + "firebase-auth.js"), import(base + "firebase-firestore.js")
+    ]);
+  }catch(e){ setStatus("Offline", "err"); return; }
+  const fbApp = appMod.initializeApp(FIREBASE_CONFIG);
+  const auth = authMod.getAuth(fbApp);
+  const db = fs.getFirestore(fbApp);
   const col = fs.collection(db, "shared");
-  cloud = {fs, col, synced:{}, ready:false};
+  cloud = {fs, col, synced:{}, ready:false, user:null};
+  const authBtn = document.getElementById("authBtn");
+  authBtn.hidden = false;
+
+  authBtn.onclick = async () => {
+    if(auth.currentUser){
+      if(confirmAction("Sign out? Anyone can still view the plans; you'll need to sign in again to edit.")) await authMod.signOut(auth);
+      return;
+    }
+    const provider = new authMod.GoogleAuthProvider();
+    try{ await authMod.signInWithPopup(auth, provider); }
+    catch(e){
+      if(e.code === "auth/popup-blocked" || e.code === "auth/operation-not-supported-in-this-environment")
+        authMod.signInWithRedirect(auth, provider);
+      else if(e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request")
+        alert("Sign-in failed: " + e.message);
+    }
+  };
+
+  const statusText = () => setStatus(cloud.user ? "Synced" : "View only", cloud.user ? "ok" : "");
+
+  authMod.onAuthStateChanged(auth, user => {
+    cloud.user = user || null;
+    authBtn.textContent = user ? "Sign out" : "Sign in to edit";
+    authBtn.title = user ? "Signed in as " + (user.email || "") : "";
+    applyMode();
+    if(user && cloud.ready) uploadBackup();
+    if(cloud.ready) statusText();
+    safeRender();
+  });
+
   fs.onSnapshot(col, snap => {
-    if(!cloud.ready && snap.metadata.fromCache) return; // wait for real server data before first merge
+    if(!cloud.ready && snap.metadata.fromCache) return; // wait for real server data
     const remote = {};
     snap.forEach(d => { try{ remote[d.id] = JSON.parse(d.data().json); }catch(e){} });
     const synced = {};
     Object.entries(remote).forEach(([id, p]) => synced[id] = JSON.stringify(p));
-    if(!cloud.ready){
-      // The first time this device ever syncs, upload any plans it made on its own.
-      let first = true; try{ first = localStorage.getItem("stride-synced") !== "1"; localStorage.setItem("stride-synced", "1"); }catch(e){}
-      if(first) state.plans.forEach(p => { if(!remote[p.id]) remote[p.id] = p; });
-      cloud.ready = true;
-    }
+    if(!cloud.ready){ backupLocalPlans(remote); }
     cloud.synced = synced;
     state.plans = Object.values(remote).sort((a,b) => (a.created||0) - (b.created||0));
     if(!current()) state.currentId = state.plans[0]?.id || null;
-    save();
+    try{ localStorage.setItem(STORE_KEY, JSON.stringify(state)); }catch(e){}
+    if(!cloud.ready){ cloud.ready = true; if(cloud.user) uploadBackup(); }
     safeRender();
-    if(!snap.metadata.hasPendingWrites) setStatus("Synced", "ok");
-  }, err => setStatus("Sync error", "err"));
+    if(!snap.metadata.hasPendingWrites) statusText();
+  }, err => setStatus("Can't load plans", "err"));
 }
 
 // Don't redraw while you're typing in a field; redraw when you leave it.
@@ -367,8 +429,8 @@ function render(){
   if(!p){
     app.innerHTML = `<div class="panel empty-state">
       <h2>Build your running plan</h2>
-      <p class="hint" style="font-size:15px">Create a plan from scratch or start from a 5K, 10K, half or marathon template — then edit any day you like.<br>Plans are saved in this browser. They sync automatically to every device you open this site on.</p>
-      <button class="btn primary" onclick="document.getElementById('newPlanBtn').click()">+ Create your first plan</button>
+      <p class="hint" style="font-size:15px">Create a plan from scratch or start from a 5K, 10K, half or marathon template — then edit any day you like.<br>Plans are saved in this browser. Anyone with the link can view them; sign in to edit.</p>
+      <button class="btn primary edit-only" onclick="document.getElementById('newPlanBtn').click()">+ Create your first plan</button>
     </div>`;
     return;
   }
@@ -384,12 +446,12 @@ function render(){
 
   let html = `<div class="panel">
     <div class="plan-head">
-      <div class="field"><label>Plan name</label><input class="plan-name" id="pName" value="${esc(p.name)}"></div>
-      <div class="field"><label>Start date</label><input type="date" id="pStart" value="${p.start}"></div>
-      <div class="field"><label>Units</label><select id="pUnits"><option value="mi" ${p.units==="mi"?"selected":""}>mi</option><option value="km" ${p.units==="km"?"selected":""}>km</option></select></div>
+      <div class="field"><label>Plan name</label><input class="plan-name" id="pName" value="${esc(p.name)}" ${canEdit()?"":"disabled"}></div>
+      <div class="field"><label>Start date</label><input type="date" id="pStart" value="${p.start}" ${canEdit()?"":"disabled"}></div>
+      <div class="field"><label>Units</label><select id="pUnits" ${canEdit()?"":"disabled"}><option value="mi" ${p.units==="mi"?"selected":""}>mi</option><option value="km" ${p.units==="km"?"selected":""}>km</option></select></div>
       <div class="spacer" style="flex:1"></div>
-      <button class="btn no-print" id="dupPlan">Duplicate</button>
-      <button class="btn danger no-print" id="delPlan">Delete plan</button>
+      <button class="btn no-print edit-only" id="dupPlan">Duplicate</button>
+      <button class="btn danger no-print edit-only" id="delPlan">Delete plan</button>
     </div>
     <div class="stats">
       <div class="stat"><b>${p.weeks.length}</b><span>weeks · ${fmtShort(start)} – ${fmtShort(end)}</span></div>
@@ -403,8 +465,8 @@ function render(){
     </div>
   </div>
   <div class="toolbar no-print">
-    <button class="btn" id="addWeekEnd">+ Add week at end</button>
-    <button class="btn" id="addWeekStart">+ Add week at start</button>
+    <button class="btn edit-only" id="addWeekEnd">+ Add week at end</button>
+    <button class="btn edit-only" id="addWeekStart">+ Add week at start</button>
     ${curWeek>=0 && curWeek<p.weeks.length ? `<button class="btn" id="jumpToday">Jump to this week</button>`:""}
   </div>
   <div class="grid">
@@ -414,7 +476,7 @@ function render(){
     const wStart = addDays(start, w*7);
     html += `<div class="week-row ${w===curWeek?"current":""}" id="week-${w}">
       <div class="week-label"><b>Week ${w+1}</b><span class="hint">${fmtShort(wStart)}</span>
-        <div class="acts">
+        <div class="acts edit-only">
           <button data-act="copy" data-w="${w}" title="Duplicate this week below">Copy</button>
           <button data-act="up" data-w="${w}" title="Move up">↑</button>
           <button data-act="down" data-w="${w}" title="Move down">↓</button>
@@ -492,13 +554,15 @@ function openDay(w, d){
   document.getElementById("dayTitle").textContent = `Week ${w+1} · ${date.toLocaleDateString(undefined,{weekday:"long", month:"short", day:"numeric"})}`;
   document.getElementById("distLabel").textContent = `Distance (${p.units})`;
   selType = day.type; paintTypes();
+  document.getElementById("dayFields").disabled = !canEdit();
+  document.getElementById("cancelDay").textContent = canEdit() ? "Cancel" : "Close";
   fDist.value = day.dist; fDur.value = day.dur; fPace.value = day.pace||""; fNotes.value = day.notes; fDone.checked = day.done;
   dayDlg.showModal();
 }
 const fDist = document.getElementById("fDist"), fDur = document.getElementById("fDur"),
       fPace = document.getElementById("fPace"), fNotes = document.getElementById("fNotes"), fDone = document.getElementById("fDone");
 document.getElementById("dayForm").onsubmit = () => {
-  const p = current(); if(!p || !editing) return;
+  const p = current(); if(!p || !editing || !canEdit()) return;
   p.weeks[editing.w][editing.d] = {type:selType, dist:fDist.value, dur:fDur.value, pace:fPace.value.trim(), notes:fNotes.value.trim(), done:fDone.checked};
   commit();
 };

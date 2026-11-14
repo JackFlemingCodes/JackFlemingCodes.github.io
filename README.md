@@ -10,11 +10,8 @@ A simple, no-signup website for building your own running training plans.
 
 Plans are saved in your browser's local storage. Use **Export** to back them up or to move them to another device.
 
-## Put it on GitHub Pages
+## Live site
 
-1. Create a new public repository on GitHub (for example `Claude_Running_Planner`).
-2. Upload `index.html` (and this README) to the repo: **Add file → Upload files → Commit**.
-3. Go to **Settings → Pages**. Under "Build and deployment", set **Source: Deploy from a branch** and **Branch: `main` / `(root)`**, then click **Save**.
-4. After a minute, your site is live at `https://<your-username>.github.io/claude_running_planner/`.
+https://jackflemingcodes.github.io/
 
-To change the site later, edit `index.html` on GitHub (pencil icon) and commit. Pages redeploys automatically.
+Hosted with GitHub Pages from the `main` branch. To change the site, edit `index.html` and commit. Pages redeploys automatically.

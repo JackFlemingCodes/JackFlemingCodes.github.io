@@ -8,7 +8,7 @@ A simple, no-signup website for building your own running training plans.
 - See weekly totals, a mileage chart, peak week, and progress
 - Export and import plans as JSON, and print a plan
 
-Plans are saved in your browser's local storage. Use **Export** to back them up or to move them to another device.
+Plans are saved in your browser. Sign in with Google (top right) to sync plans across devices through Firebase. Sync turns on once `FIREBASE_CONFIG` is set in `index.html`.
 
 ## Live site
 

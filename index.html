@@ -23,6 +23,9 @@ header select{background:#2b2f35;color:#fff;border:1px solid #444;border-radius:
 .btn:hover{border-color:#bbb}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .btn.ghost{background:transparent;color:inherit;border-color:#555}
+.sync-status{font-size:13px;color:#b9bdc3}
+.sync-status.ok::before{content:"● ";color:#4caf7d}
+.sync-status.err::before{content:"● ";color:#e4572e}
 .btn.danger{color:#c0392b}
 .btn.small{padding:3px 8px;font-size:13px}
 main{max-width:1280px;margin:0 auto;padding:20px 24px 60px}
@@ -101,6 +104,8 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
   <select id="planSelect" title="Your plans"></select>
   <button class="btn ghost" id="newPlanBtn">+ New plan</button>
   <div class="spacer"></div>
+  <span id="syncStatus" class="sync-status"></span>
+  <button class="btn ghost" id="authBtn" hidden>Sign in to sync</button>
   <button class="btn ghost" id="importBtn">Import</button>
   <button class="btn ghost" id="exportBtn">Export</button>
   <button class="btn ghost" id="printBtn">Print</button>
@@ -185,6 +190,106 @@ function load(){
 }
 function save(){
   try{ localStorage.setItem(STORE_KEY, JSON.stringify(state)); }catch(e){}
+  pushCloud();
+}
+
+// ---------- cloud sync (Firebase) ----------
+// Paste your Firebase web app config here to turn on syncing across devices.
+const FIREBASE_CONFIG = null;
+const FIREBASE_VERSION = "10.12.2";
+let cloud = null; // {fs, col, synced:{planId: json}, ready}
+const authBtn = document.getElementById("authBtn");
+const syncStatus = document.getElementById("syncStatus");
+function setStatus(text, cls=""){ syncStatus.textContent = text; syncStatus.className = "sync-status " + cls; }
+
+function pushCloud(){
+  if(!cloud || !cloud.ready) return;
+  const {fs, col, synced} = cloud;
+  const ids = new Set(state.plans.map(p => p.id));
+  state.plans.forEach(p => {
+    const json = JSON.stringify(p);
+    if(synced[p.id] === json) return;
+    synced[p.id] = json;
+    setStatus("Saving…");
+    fs.setDoc(fs.doc(col, p.id), {json, updated: fs.serverTimestamp()})
+      .catch(err => setStatus("Sync error", "err"));
+  });
+  Object.keys(synced).forEach(id => {
+    if(ids.has(id)) return;
+    delete synced[id];
+    fs.deleteDoc(fs.doc(col, id)).catch(err => setStatus("Sync error", "err"));
+  });
+}
+
+async function initCloud(){
+  if(!FIREBASE_CONFIG) return;
+  const base = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/`;
+  let appMod, authMod, fs;
+  try{
+    [appMod, authMod, fs] = await Promise.all([
+      import(base + "firebase-app.js"), import(base + "firebase-auth.js"), import(base + "firebase-firestore.js")
+    ]);
+  }catch(e){ setStatus("Sync unavailable", "err"); return; }
+  const fbApp = appMod.initializeApp(FIREBASE_CONFIG);
+  const auth = authMod.getAuth(fbApp);
+  const db = fs.getFirestore(fbApp);
+  authBtn.hidden = false;
+
+  authBtn.onclick = async () => {
+    if(auth.currentUser){
+      if(confirmAction("Sign out? Your plans stay saved in your account.")) await authMod.signOut(auth);
+      return;
+    }
+    const provider = new authMod.GoogleAuthProvider();
+    try{ await authMod.signInWithPopup(auth, provider); }
+    catch(e){
+      if(e.code === "auth/popup-blocked" || e.code === "auth/operation-not-supported-in-this-environment")
+        authMod.signInWithRedirect(auth, provider);
+      else if(e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request")
+        alert("Sign-in failed: " + e.message);
+    }
+  };
+
+  let unsub = null;
+  authMod.onAuthStateChanged(auth, user => {
+    if(unsub){ unsub(); unsub = null; }
+    cloud = null;
+    if(!user){ authBtn.textContent = "Sign in to sync"; authBtn.title = ""; setStatus("Not synced"); return; }
+    authBtn.textContent = "Sign out";
+    authBtn.title = "Signed in as " + (user.email || user.displayName || "");
+    setStatus("Syncing…");
+    const col = fs.collection(db, "users", user.uid, "plans");
+    cloud = {fs, col, synced:{}, ready:false};
+    unsub = fs.onSnapshot(col, snap => {
+      if(!cloud.ready && snap.metadata.fromCache) return; // wait for real server data before first merge
+      const remote = {};
+      snap.forEach(d => { try{ remote[d.id] = JSON.parse(d.data().json); }catch(e){} });
+      const synced = {};
+      Object.entries(remote).forEach(([id, p]) => synced[id] = JSON.stringify(p));
+      if(!cloud.ready){
+        // First load after sign-in: keep any plans made on this device that aren't in the cloud yet.
+        state.plans.forEach(p => { if(!remote[p.id]) remote[p.id] = p; });
+        cloud.ready = true;
+      }
+      cloud.synced = synced;
+      state.plans = Object.values(remote).sort((a,b) => (a.created||0) - (b.created||0));
+      if(!current()) state.currentId = state.plans[0]?.id || null;
+      save();
+      safeRender();
+      if(!snap.metadata.hasPendingWrites) setStatus("Synced", "ok");
+    }, err => setStatus("Sync error", "err"));
+  });
+}
+
+// Don't redraw while you're typing in a field; redraw when you leave it.
+let renderDeferred = false;
+function safeRender(){
+  const a = document.activeElement;
+  if(a && app.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)){
+    if(!renderDeferred){ renderDeferred = true; a.addEventListener("blur", () => { renderDeferred = false; render(); }, {once:true}); }
+    return;
+  }
+  render();
 }
 const uid = () => Math.random().toString(36).slice(2,10);
 const current = () => state.plans.find(p => p.id === state.currentId) || null;
@@ -284,7 +389,7 @@ function render(){
   if(!p){
     app.innerHTML = `<div class="panel empty-state">
       <h2>Build your running plan</h2>
-      <p class="hint" style="font-size:15px">Create a plan from scratch or start from a 5K, 10K, half or marathon template — then edit any day you like.<br>Plans are saved in this browser. Use Export to back them up or move them to another device.</p>
+      <p class="hint" style="font-size:15px">Create a plan from scratch or start from a 5K, 10K, half or marathon template — then edit any day you like.<br>Plans are saved in this browser. Sign in to sync them across your devices, or use Export to back them up.</p>
       <button class="btn primary" onclick="document.getElementById('newPlanBtn').click()">+ Create your first plan</button>
     </div>`;
     return;
@@ -369,7 +474,7 @@ function bindPlan(p){
     state.currentId = state.plans[0]?.id || null; commit();
   };
   $("dupPlan").onclick = () => {
-    const copy = JSON.parse(JSON.stringify(p)); copy.id = uid(); copy.name = p.name + " (copy)";
+    const copy = JSON.parse(JSON.stringify(p)); copy.id = uid(); copy.created = Date.now(); copy.name = p.name + " (copy)";
     state.plans.push(copy); state.currentId = copy.id; commit();
   };
   $("addWeekEnd").onclick = () => { p.weeks.push(emptyWeek()); commit(); };
@@ -449,6 +554,7 @@ document.getElementById("newForm").onsubmit = () => {
   const sv = parseFloat(nStartVol.value)||10, pv = Math.max(sv, parseFloat(nPeakVol.value)||sv);
   const plan = {
     id: uid(),
+    created: Date.now(),
     name: document.getElementById("nName").value.trim() || "My training plan",
     start: document.getElementById("nStart").value,
     units,
@@ -476,7 +582,7 @@ document.getElementById("importFile").onchange = async e => {
     const data = JSON.parse(await file.text());
     const plans = Array.isArray(data.plans) ? data.plans : (data.weeks ? [data] : []);
     if(!plans.length) throw new Error("No plans found");
-    plans.forEach(p => { p.id = uid(); if(!p.weeks || !p.start) throw new Error("Bad plan"); state.plans.push(p); });
+    plans.forEach((p, i) => { p.id = uid(); p.created = Date.now() + i; if(!p.weeks || !p.start) throw new Error("Bad plan"); state.plans.push(p); });
     state.currentId = state.plans[state.plans.length-1].id; commit();
   }catch(err){ alert("Couldn't import that file: " + err.message); }
   e.target.value = "";
@@ -485,6 +591,7 @@ document.getElementById("importFile").onchange = async e => {
 load();
 if(!current() && state.plans.length) state.currentId = state.plans[0].id;
 render();
+initCloud();
 })();
 </script>
 </body>

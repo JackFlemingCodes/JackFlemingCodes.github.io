@@ -132,12 +132,12 @@ dialog::backdrop{background:rgba(20,22,25,.45)}
     </div>
     <div class="field"><label>Pace / effort target</label><input type="text" id="fPace" placeholder="e.g. 8:30/mi, conversational, RPE 7"></div>
     <div class="field"><label>Details</label><textarea id="fNotes" rows="3" placeholder="e.g. 6 × 800m @ 5K pace, 400m jog recovery"></textarea></div>
-    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="fDone"> Completed</label>
     </fieldset>
+    <label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" id="fDone" style="width:18px;height:18px"> Completed</label>
     <div class="foot">
       <button type="button" class="btn danger left edit-only" id="clearDay">Clear</button>
       <button type="button" class="btn" id="cancelDay">Cancel</button>
-      <button type="submit" class="btn primary edit-only">Save</button>
+      <button type="submit" class="btn primary">Save</button>
     </div>
   </form>
 </dialog>
@@ -273,7 +273,13 @@ async function initCloud(){
   const auth = authMod.getAuth(fbApp);
   const db = fs.getFirestore(fbApp);
   const col = fs.collection(db, "shared");
-  cloud = {fs, col, synced:{}, ready:false, user:null};
+  cloud = {fs, col, synced:{}, ready:false, user:null, doneCol: fs.collection(db, "done"), done:{}};
+  fs.onSnapshot(cloud.doneCol, snap => {
+    const done = {};
+    snap.forEach(d => { const days = d.data().days; if(days && typeof days === "object") done[d.id] = days; });
+    cloud.done = done;
+    safeRender();
+  }, err => {});
   const authBtn = document.getElementById("authBtn");
   authBtn.hidden = false;
 
@@ -348,6 +354,27 @@ const emptyWeek = () => DAYS.map(emptyDay);
 const round = (n, step=0.5) => Math.max(step, Math.round(n/step)*step);
 function weekTotal(w){ return w.reduce((s,d)=> s + (parseFloat(d.dist)||0), 0); }
 function fmtNum(n){ return (Math.round(n*10)/10).toString(); }
+
+// ---------- completion ----------
+// With Firebase on, completions live in the "done" collection (keyed by date) so anyone can tick them.
+function dayISO(p, w, i){ return fmtISO(addDays(parseDate(p.start), w*7 + i)); }
+function isDone(p, w, i){
+  const d = p.weeks[w][i];
+  const m = cloud && cloud.done && cloud.done[p.id];
+  const iso = dayISO(p, w, i);
+  return (m && iso in m) ? !!m[iso] : !!d.done;
+}
+function setDone(p, w, i, val){
+  if(!FIREBASE_CONFIG || !cloud){ p.weeks[w][i].done = val; return false; }
+  const iso = dayISO(p, w, i);
+  cloud.done = cloud.done || {};
+  (cloud.done[p.id] = cloud.done[p.id] || {})[iso] = val;
+  setStatus("Saving…");
+  cloud.fs.setDoc(cloud.fs.doc(cloud.doneCol, p.id), {days: {[iso]: val}}, {merge: true})
+    .then(() => setStatus(cloud.user ? "Synced" : "View only", cloud.user ? "ok" : ""))
+    .catch(() => setStatus("Couldn't save completion", "err"));
+  return true;
+}
 
 // ---------- template generator ----------
 const GOALS = {
@@ -439,7 +466,7 @@ function render(){
   const totals = p.weeks.map(weekTotal);
   const total = totals.reduce((a,b)=>a+b,0);
   const peak = Math.max(0,...totals);
-  const doneDist = p.weeks.flat().filter(d=>d.done).reduce((s,d)=>s+(parseFloat(d.dist)||0),0);
+  let doneDist = 0; p.weeks.forEach((wk, w) => wk.forEach((d, i) => { if(isDone(p, w, i)) doneDist += parseFloat(d.dist)||0; }));
   const runs = p.weeks.flat().filter(d=>d.type && !["rest","cross","strength"].includes(d.type)).length;
   const curWeek = Math.floor((parseDate(tISO) - start) / 86400000 / 7);
   const end = addDays(start, p.weeks.length*7 - 1);
@@ -487,7 +514,7 @@ function render(){
     week.forEach((d, i) => {
       const date = addDays(wStart, i);
       const t = TYPES[d.type];
-      const cls = ["day", !d.type?"empty":"", d.type==="rest"?"rest":"", d.done?"done":"", fmtISO(date)===tISO?"today":""].join(" ");
+      const cls = ["day", !d.type?"empty":"", d.type==="rest"?"rest":"", isDone(p, w, i)?"done":"", fmtISO(date)===tISO?"today":""].join(" ");
       html += `<div class="${cls}" data-w="${w}" data-d="${i}" style="${t?`border-left-color:${t.color}`:""}">
         <div class="date">${DAYS[i]} ${fmtShort(date)}</div>
         ${t ? `<div class="type" style="color:${t.color}">${t.label}</div>` : `<div class="hint">+ add</div>`}
@@ -556,15 +583,17 @@ function openDay(w, d){
   selType = day.type; paintTypes();
   document.getElementById("dayFields").disabled = !canEdit();
   document.getElementById("cancelDay").textContent = canEdit() ? "Cancel" : "Close";
-  fDist.value = day.dist; fDur.value = day.dur; fPace.value = day.pace||""; fNotes.value = day.notes; fDone.checked = day.done;
+  fDist.value = day.dist; fDur.value = day.dur; fPace.value = day.pace||""; fNotes.value = day.notes; fDone.checked = isDone(p, w, d);
   dayDlg.showModal();
 }
 const fDist = document.getElementById("fDist"), fDur = document.getElementById("fDur"),
       fPace = document.getElementById("fPace"), fNotes = document.getElementById("fNotes"), fDone = document.getElementById("fDone");
 document.getElementById("dayForm").onsubmit = () => {
-  const p = current(); if(!p || !editing || !canEdit()) return;
-  p.weeks[editing.w][editing.d] = {type:selType, dist:fDist.value, dur:fDur.value, pace:fPace.value.trim(), notes:fNotes.value.trim(), done:fDone.checked};
-  commit();
+  const p = current(); if(!p || !editing) return;
+  const {w, d} = editing, old = p.weeks[w][d];
+  if(canEdit()) p.weeks[w][d] = {type:selType, dist:fDist.value, dur:fDur.value, pace:fPace.value.trim(), notes:fNotes.value.trim(), done:old.done};
+  if(fDone.checked !== isDone(p, w, d)) setDone(p, w, d, fDone.checked);
+  if(canEdit()) commit(); else render();
 };
 document.getElementById("cancelDay").onclick = () => dayDlg.close();
 document.getElementById("clearDay").onclick = () => { const p = current(); p.weeks[editing.w][editing.d] = emptyDay(); dayDlg.close(); commit(); };

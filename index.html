@@ -378,7 +378,6 @@ function setDone(p, w, i, val){
 
 // ---------- confetti ----------
 function confetti(x, y){
-  try{ if(window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; }catch(e){}
   const cv = document.createElement("canvas");
   cv.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:100";
   const dpr = window.devicePixelRatio || 1;

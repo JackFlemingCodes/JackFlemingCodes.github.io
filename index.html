@@ -376,6 +376,40 @@ function setDone(p, w, i, val){
   return true;
 }
 
+// ---------- confetti ----------
+function confetti(x, y){
+  try{ if(window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; }catch(e){}
+  const cv = document.createElement("canvas");
+  cv.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:100";
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  cv.style.width = innerWidth + "px"; cv.style.height = innerHeight + "px";
+  document.body.appendChild(cv);
+  const ctx = cv.getContext("2d"); ctx.scale(dpr, dpr);
+  const colors = ["#e4572e","#4caf7d","#2f6fd6","#e79a1b","#8a3ffc","#3aa6b9","#f2c14e"];
+  const parts = Array.from({length: 160}, () => {
+    const a = -Math.PI/2 + (Math.random()-0.5) * Math.PI * 0.9, v = 7 + Math.random() * 9;
+    return {x, y, vx: Math.cos(a)*v, vy: Math.sin(a)*v, w: 6 + Math.random()*6, h: 4 + Math.random()*4,
+            r: Math.random()*Math.PI, vr: (Math.random()-0.5)*0.3, c: colors[Math.random()*colors.length|0],
+            circle: Math.random() < 0.25};
+  });
+  const start = performance.now(), dur = 2600;
+  (function frame(now){
+    const t = now - start;
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    ctx.globalAlpha = t > dur - 700 ? Math.max(0, (dur - t) / 700) : 1;
+    for(const p of parts){
+      p.vy += 0.28; p.vx *= 0.985; p.vy *= 0.985;
+      p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.fillStyle = p.c;
+      if(p.circle){ ctx.beginPath(); ctx.arc(0, 0, p.h/2, 0, Math.PI*2); ctx.fill(); }
+      else ctx.fillRect(-p.w/2, -p.h/2, p.w, p.h * Math.abs(Math.cos(p.r*2)) + 1);
+      ctx.restore();
+    }
+    if(t < dur) requestAnimationFrame(frame); else cv.remove();
+  })(start);
+}
+
 // ---------- template generator ----------
 const GOALS = {
   "5k":       {name:"5K",            race:3.1,  start:15, peak:25, longCap:7,  taper:1},
@@ -592,8 +626,15 @@ document.getElementById("dayForm").onsubmit = () => {
   const p = current(); if(!p || !editing) return;
   const {w, d} = editing, old = p.weeks[w][d];
   if(canEdit()) p.weeks[w][d] = {type:selType, dist:fDist.value, dur:fDur.value, pace:fPace.value.trim(), notes:fNotes.value.trim(), done:old.done};
+  const celebrate = fDone.checked && !isDone(p, w, d);
   if(fDone.checked !== isDone(p, w, d)) setDone(p, w, d, fDone.checked);
   if(canEdit()) commit(); else render();
+  if(celebrate){
+    const cell = app.querySelector(`.day[data-w="${w}"][data-d="${d}"]`);
+    const r = cell ? cell.getBoundingClientRect() : null;
+    const inView = r && r.bottom > 0 && r.top < innerHeight;
+    confetti(inView ? r.left + r.width/2 : innerWidth/2, inView ? r.top + r.height/2 : innerHeight*0.6);
+  }
 };
 document.getElementById("cancelDay").onclick = () => dayDlg.close();
 document.getElementById("clearDay").onclick = () => { const p = current(); p.weeks[editing.w][editing.d] = emptyDay(); dayDlg.close(); commit(); };

@@ -637,6 +637,13 @@ document.getElementById("dayForm").onsubmit = () => {
   }
 };
 document.getElementById("cancelDay").onclick = () => dayDlg.close();
+// Ticking "Completed" saves straight away (and celebrates).
+fDone.onchange = () => {
+  if(!fDone.checked) return;
+  const form = document.getElementById("dayForm");
+  if(form.requestSubmit) form.requestSubmit();
+  else { form.onsubmit(); dayDlg.close(); }
+};
 document.getElementById("clearDay").onclick = () => { const p = current(); p.weeks[editing.w][editing.d] = emptyDay(); dayDlg.close(); commit(); };
 
 // ---------- new plan ----------
